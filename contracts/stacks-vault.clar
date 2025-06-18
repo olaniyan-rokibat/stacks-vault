@@ -96,3 +96,113 @@
     last-claim: uint,
   }
 )
+
+;; Private Functions for Input Validation
+
+(define-private (validate-uri (uri (string-ascii 256)))
+  (let ((uri-len (len uri)))
+    (and
+      (> uri-len u0)
+      (<= uri-len u256)
+    )
+  )
+)
+
+(define-private (validate-recipient (recipient principal))
+  (not (is-eq recipient (as-contract tx-sender)))
+)
+
+(define-private (safe-add
+    (a uint)
+    (b uint)
+  )
+  (let ((sum (+ a b)))
+    (asserts! (>= sum a) err-overflow)
+    (ok sum)
+  )
+)
+
+;; NFT Core Functions
+
+(define-public (mint-nft
+    (uri (string-ascii 256))
+    (collateral uint)
+  )
+  (let (
+      (token-id (+ (var-get total-supply) u1))
+      (collateral-requirement (/ (* (var-get min-collateral-ratio) collateral) u100))
+    )
+    (asserts! (validate-uri uri) err-invalid-uri)
+    (asserts! (>= (stx-get-balance tx-sender) collateral-requirement)
+      err-insufficient-collateral
+    )
+    (try! (stx-transfer? collateral-requirement tx-sender (as-contract tx-sender)))
+    (map-set tokens { token-id: token-id } {
+      owner: tx-sender,
+      uri: uri,
+      collateral: collateral,
+      is-staked: false,
+      stake-timestamp: u0,
+      fractional-shares: u0,
+    })
+    (var-set total-supply token-id)
+    (ok token-id)
+  )
+)
+
+(define-public (transfer-nft
+    (token-id uint)
+    (recipient principal)
+  )
+  (let ((token (unwrap! (get-token-info token-id) err-invalid-token)))
+    (asserts! (validate-recipient recipient) err-invalid-recipient)
+    (asserts! (is-eq tx-sender (get owner token)) err-not-token-owner)
+    (asserts! (not (get is-staked token)) err-already-staked)
+    (map-set tokens { token-id: token-id } (merge token { owner: recipient }))
+    (ok true)
+  )
+)
+
+;; Marketplace Functions
+
+(define-public (list-nft
+    (token-id uint)
+    (price uint)
+  )
+  (let ((token (unwrap! (get-token-info token-id) err-invalid-token)))
+    (asserts! (> price u0) err-invalid-price)
+    (asserts! (is-eq tx-sender (get owner token)) err-not-token-owner)
+    (asserts! (not (get is-staked token)) err-already-staked)
+    (map-set token-listings { token-id: token-id } {
+      price: price,
+      seller: tx-sender,
+      active: true,
+    })
+    (ok true)
+  )
+)
+
+(define-public (purchase-nft (token-id uint))
+  (let (
+      (listing (unwrap! (get-listing token-id) err-listing-not-found))
+      (price (get price listing))
+      (seller (get seller listing))
+      (fee (/ (* price (var-get protocol-fee)) u1000))
+    )
+    (asserts! (get active listing) err-listing-not-found)
+    (asserts! (is-eq (get active listing) true) err-listing-not-found)
+    ;; Transfer STX from buyer to seller
+    (try! (stx-transfer? price tx-sender seller))
+    ;; Transfer protocol fee
+    (try! (stx-transfer? fee tx-sender (as-contract tx-sender)))
+    ;; Update token ownership
+    (try! (transfer-nft token-id tx-sender))
+    ;; Clear listing
+    (map-set token-listings { token-id: token-id } {
+      price: u0,
+      seller: seller,
+      active: false,
+    })
+    (ok true)
+  )
+)
